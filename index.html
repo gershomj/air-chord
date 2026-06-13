@@ -382,22 +382,15 @@ async function processFrame() {
       const gesture = getGesture(lm);
       handObj.gesture = gesture;
 
-      // Note wheel — left hand: palm open = lower 5, fist/closed = upper notes
-      const palmOpen = gesture.count >= 3;
-      const SPLIT = 5;
-      const lowNotes = scaleNotes.slice(0, SPLIT);
-      const highNotes = scaleNotes.slice(SPLIT);
-      const activeNotes = palmOpen ? lowNotes : (highNotes.length ? highNotes : lowNotes);
-      const activeNum = activeNotes.length;
-      const noteIdx = angleToSegment(angle, activeNum, snapCheck.checked);
-      handObj.note = activeNotes[noteIdx] || 'C';
-      handObj.noteBank = palmOpen ? 'low' : 'high';
-      handObj.activeNotes = activeNotes;
-      handObj.activeNum = activeNum;
+      // Left hand: height = pitch (higher hand = higher note)
+      //            openness = volume (open palm = loud, fist = quiet)
+      const h = 1.0 - wrist.y; // 0=bottom, 1=top
+      const noteIdx = Math.floor(h * numNotes);
+      handObj.note = scaleNotes[Math.min(noteIdx, numNotes - 1)] || 'C';
+      handObj.volume = gesture.count / 5; // 0 fingers=0, 5 fingers=1
 
-      // Right hand: gesture controls chord quality, height controls volume
+      // Right hand: gesture controls chord quality
       handObj.quality = gesture.quality || 'maj';
-      handObj.volume = Math.max(0.05, Math.min(0.8, 1.0 - wrist.y)); // y=0(top)=loud, y=1(bottom)=quiet
 
       // Assign based on handedness
       if (isLeft && !leftHand) leftHand = handObj;
@@ -423,7 +416,7 @@ async function processFrame() {
     if (mode === 'two-hand' && leftHand && rightHand) {
       rootNote = leftHand.note;
       quality = rightHand.gesture?.quality || 'maj';
-      volume = rightHand.volume || 0.25;
+      volume = leftHand.volume || 0.25; // left hand openness = volume
       gestureName = rightHand.gesture?.name || '?';
     } else if (mode === 'melody' && rightHand) {
       rootNote = rightHand.note;
@@ -452,24 +445,37 @@ async function processFrame() {
       if (chordName !== currentChord?.name || volume !== currentChord?.volume) {
         currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs, volume };
         chordLabel.textContent = chordName;
-        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName} [${leftHand?.noteBank === 'high' ? 'HI' : 'LO'}]`;
+        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName} vol:${Math.round(volume*100)}%`;
         freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
         playChord(chordFreqs, volume);
       }
     }
 
-    // Draw left wheel with active note bank
-    const cxL = w * 0.28, cxR = w * 0.72, cyW = h * 0.42, rad = Math.min(w * 0.2, h * 0.22);
-    if (leftHand && leftHand.activeNotes) {
-      drawWheel(cxL, cyW, rad, leftHand.activeNum, leftHand.activeNotes,
-        angleToSegment(leftHand.angle, leftHand.activeNum, snapCheck.checked), 'rgba(255,153,68,0.5)');
-      // Show which bank
-      ctx.fillStyle = 'rgba(255,153,68,0.8)';
+    // Left hand: vertical pitch bar
+    const barX = w * 0.2, barW = 28, barTop = h * 0.1, barH = h * 0.75;
+    if (leftHand) {
+      // Volume bar (width of bar = openness)
+      const volW = barW * leftHand.volume;
+      ctx.fillStyle = 'rgba(255,153,68,0.15)';
+      ctx.fillRect(barX, barTop, barW, barH);
+      ctx.fillStyle = 'rgba(255,153,68,0.6)';
+      ctx.fillRect(barX, barTop, volW, barH);
+      // Pitch indicator (hand height)
+      const h = 1.0 - leftHand.y;
+      const py = barTop + barH * (1 - h);
+      ctx.fillStyle = '#ff9944';
+      ctx.fillRect(barX - 4, py - 3, barW + 8, 6);
+      // Labels
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.font = '10px system-ui';
       ctx.textAlign = 'center';
-      ctx.fillText(leftHand.noteBank === 'low' ? 'LO' : 'HI', cxL, cyW + rad + 16);
+      ctx.fillText(scaleNotes[numNotes-1] || '?', barX + barW/2, barTop - 4);
+      ctx.fillText(scaleNotes[0] || '?', barX + barW/2, barTop + barH + 14);
+      ctx.fillText(leftHand.note, barX + barW/2, py - 8);
     }
-    // Right hand: show gesture label instead of wheel
+
+    const cxR = w * 0.72, cyW = h * 0.42;
+    // Right hand: show gesture label
     if (rightHand) {
       const g = rightHand.gesture;
       ctx.fillStyle = '#4499ff';
