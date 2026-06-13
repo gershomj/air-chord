@@ -234,7 +234,7 @@ function drawBar(cx, w, top, h, pitch, volume) {
 
 // ─── Main loop ────────────────────────────────────
 let lastTime = 0;
-const SMOOTH = 0.3; // smoothing factor (lower = smoother)
+const SMOOTH = 0.1; // lower = smoother
 
 async function processFrame() {
   try {
@@ -260,7 +260,7 @@ async function processFrame() {
     smoothVol = smoothVol + (rawVol - smoothVol) * SMOOTH;
     // Horizontal = pitch bend (±2 semitones like a mod wheel)
     const rawBend = (wrist.x - 0.5) * 2; // -1 (left) to +1 (right)
-    smoothBend = smoothBend + (rawBend - smoothBend) * SMOOTH * 0.5;
+    smoothBend = smoothBend + (rawBend - smoothBend) * SMOOTH;
 
     // Map to note + bend
     const scaleNotes = getScaleNotes(scaleSelect.value);
