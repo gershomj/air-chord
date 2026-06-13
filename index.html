@@ -17,7 +17,6 @@
     user-select: none; -webkit-user-select: none;
   }
 
-  /* --- Header --- */
   #header {
     padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;
     background: var(--panel); border-bottom: 1px solid #222; z-index: 10;
@@ -27,7 +26,6 @@
   #status { font-size: 12px; padding: 3px 8px; border-radius: 10px; background: #222; }
   #status.active { background: #1a3a1a; color: #4f4; }
 
-  /* --- Camera --- */
   #camera-wrap {
     flex: 1; position: relative; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
@@ -35,9 +33,7 @@
   }
   #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
   #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-  #overlay { position: absolute; inset: 0; pointer-events: none; }
 
-  /* --- Controls --- */
   #controls {
     display: flex; gap: 8px; padding: 10px 12px;
     background: var(--panel); border-top: 1px solid #222;
@@ -50,16 +46,14 @@
   #controls button { background: var(--gold); color: #000; border: none; font-weight: 600; }
   #controls button:active { opacity: .8; }
   #controls label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
-  #controls input[type=checkbox] { accent-color: var(--gold); }
 
-  /* --- Data overlay --- */
   #data-panel {
     position: absolute; top: 12px; right: 12px; z-index: 20;
     background: rgba(0,0,0,.65); padding: 10px 14px; border-radius: 10px;
     font-size: 12px; line-height: 1.6; backdrop-filter: blur(6px);
     border: 1px solid rgba(255,255,255,.08); min-width: 100px;
   }
-  #data-panel .chord-display { font-size: 28px; font-weight: 700; color: var(--gold); }
+  #data-panel .note-display { font-size: 32px; font-weight: 700; color: var(--gold); }
 </style>
 </head>
 <body>
@@ -72,22 +66,14 @@
 <div id="camera-wrap">
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas"></canvas>
-  <div id="overlay"></div>
   <div id="data-panel">
-    <div id="chord-label" class="chord-display">—</div>
-    <div id="hands-count">Hands: 0</div>
-    <div id="note-info" style="color:var(--muted)">Note: —</div>
+    <div id="note-label" class="note-display">—</div>
     <div id="freq-info" style="color:var(--muted)">Freq: — Hz</div>
+    <div id="vol-info" style="color:var(--muted)">Vol: —%</div>
   </div>
 </div>
 
 <div id="controls">
-  <label>Mode
-    <select id="mode-select">
-      <option value="two-hand">Two-hand Chord</option>
-      <option value="melody">Melody (R-hand)</option>
-    </select>
-  </label>
   <label>Scale
     <select id="scale-select">
       <option value="major">Major</option>
@@ -105,22 +91,19 @@
   </label>
   <label>Oct
     <select id="octave-select">
-      <option value="3">Oct 3</option>
-      <option value="4" selected>Oct 4</option>
-      <option value="5">Oct 5</option>
+      <option value="3">3</option>
+      <option value="4" selected>4</option>
+      <option value="5">5</option>
     </select>
   </label>
-  <label><input type="checkbox" id="snap-check" checked> Snap</label>
   <button id="toggle-audio">🔇 Start Audio</button>
 </div>
 
-<!-- Loading bar (plain script — runs before module, survives import failures) -->
 <div id="loading-bar-wrap" style="position:fixed;bottom:0;left:0;right:0;height:3px;z-index:99;background:#222">
   <div id="loading-bar" style="height:100%;width:0%;background:var(--gold);transition:width .3s"></div>
   <div id="loading-text" style="position:absolute;bottom:6px;left:12px;font-size:10px;color:var(--muted)"></div>
 </div>
 <script>
-  // Plain script — survives module import failures
   window._airChord = { progress(el) {
     const bar = document.getElementById('loading-bar');
     const txt = document.getElementById('loading-text');
@@ -131,89 +114,56 @@
 </script>
 
 <script type="module">
-// Dynamic import — works through tunnels where static imports fail silently
 const MP_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm';
 const { HandLandmarker, FilesetResolver } = await import(MP_URL);
 
-// ─── DOM refs ────────────────────────────────────
+// ─── DOM ──────────────────────────────────────────
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-const chordLabel = document.getElementById('chord-label');
-const handsCount = document.getElementById('hands-count');
-const noteInfo = document.getElementById('note-info');
+const noteLabel = document.getElementById('note-label');
 const freqInfo = document.getElementById('freq-info');
+const volInfo = document.getElementById('vol-info');
 const toggleBtn = document.getElementById('toggle-audio');
-const modeSelect = document.getElementById('mode-select');
 const scaleSelect = document.getElementById('scale-select');
 const waveSelect = document.getElementById('wave-select');
 const octaveSelect = document.getElementById('octave-select');
-const snapCheck = document.getElementById('snap-check');
 
-// ─── State ───────────────────────────────────────
+// ─── State ────────────────────────────────────────
 let handLandmarker = null;
 let audioCtx = null;
-let oscillators = [];
+let oscillator = null;
 let gainNode = null;
 let audioStarted = false;
-let leftHand = null;   // { x, y, note }
-let rightHand = null;  // { x, y, quality }
-let currentChord = null; // { root, quality, freqs }
+let currentNote = null;
+let smoothVol = 0;
+let smoothPitch = 0.5;
 
-// ─── Note definitions ────────────────────────────
+// ─── Note definitions ─────────────────────────────
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];     // C D E F G A B
-const MAJOR_NOTE_NAMES = ['C','D','E','F','G','A','B'];
-const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];     // C D Eb F G Ab Bb
-const MINOR_NOTE_NAMES = ['C','D','Eb','F','G','Ab','Bb'];
-const CHROMATIC = [0,1,2,3,4,5,6,7,8,9,10,11];
-
-const CHORD_QUALITIES = ['maj','maj7','7','m','m7','dim','aug','sus4'];
-
-// Chord formulas (semitones from root)
-const CHORD_INTERVALS = {
-  root: [0],           // single note
-  5:    [0, 7],        // power chord
-  maj:  [0, 4, 7],
-  maj7: [0, 4, 7, 11],
-  7:    [0, 4, 7, 10],
-  m:    [0, 3, 7],
-  m7:   [0, 3, 7, 10],
-  dim:  [0, 3, 6],
-  aug:  [0, 4, 8],
-  sus4: [0, 5, 7],
-};
-
-function noteToFreq(note, octave = 4) {
-  const idx = NOTE_NAMES.indexOf(note);
-  if (idx === -1) return 261.63; // default C4
-  const a4 = 440;
-  const a4_idx = NOTE_NAMES.indexOf('A');
-  const semitones = idx - a4_idx + (octave - 4) * 12;
-  return a4 * Math.pow(2, semitones / 12);
-}
+const MAJOR_NOTES = ['C','D','E','F','G','A','B'];
+const MINOR_NOTES = ['C','D','Eb','F','G','Ab','Bb'];
 
 function getScaleNotes(scale) {
-  if (scale === 'major') return MAJOR_NOTE_NAMES;
-  if (scale === 'minor') return MINOR_NOTE_NAMES;
+  if (scale === 'major') return MAJOR_NOTES;
+  if (scale === 'minor') return MINOR_NOTES;
   return NOTE_NAMES;
 }
 
-function getScaleIntervals(scale) {
-  if (scale === 'major') return MAJOR_SCALE;
-  if (scale === 'minor') return MINOR_SCALE;
-  return CHROMATIC;
+function noteToFreq(note, octave = 4) {
+  const idx = NOTE_NAMES.indexOf(note);
+  if (idx === -1) return 261.63;
+  return 440 * Math.pow(2, (idx - NOTE_NAMES.indexOf('A') + (octave - 4) * 12) / 12);
 }
 
-// ─── Audio engine ────────────────────────────────
+// ─── Audio ────────────────────────────────────────
 async function startAudio() {
   if (audioStarted) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  // iOS Safari may suspend the context even after user gesture
   if (audioCtx.state === 'suspended') await audioCtx.resume();
   gainNode = audioCtx.createGain();
-  gainNode.gain.value = 0.15;
+  gainNode.gain.value = 0;
   gainNode.connect(audioCtx.destination);
   audioStarted = true;
   toggleBtn.textContent = '🔊 Live';
@@ -221,131 +171,63 @@ async function startAudio() {
   statusEl.className = 'active';
 }
 
-function stopAllOscillators() {
-  oscillators.forEach(o => { try { o.stop() } catch(e) {} });
-  oscillators = [];
-}
-
-function playChord(freqs, volume = 0.25) {
+function playNote(freq, volume) {
   if (!audioStarted) return;
-  stopAllOscillators();
-  // Apply hand-height volume to master gain
-  if (gainNode) gainNode.gain.value = Math.max(0.02, volume * 0.8);
-  const waveType = waveSelect.value;
-  freqs.forEach(f => {
-    const osc = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    osc.type = waveType;
-    osc.frequency.value = f;
-    g.gain.value = 0.25;
-    osc.connect(g);
-    g.connect(gainNode);
-    osc.start();
-    oscillators.push(osc);
-  });
+  if (oscillator) { try { oscillator.stop() } catch(e) {} }
+  oscillator = audioCtx.createOscillator();
+  oscillator.type = waveSelect.value;
+  oscillator.frequency.value = freq;
+  oscillator.connect(gainNode);
+  oscillator.start();
+  gainNode.gain.value = volume * 0.4;
 }
 
-function getChordFreqs(rootNote, quality) {
-  const intervals = CHORD_INTERVALS[quality] || CHORD_INTERVALS.maj;
-  const rootIdx = NOTE_NAMES.indexOf(rootNote);
-  if (rootIdx === -1) return [261.63];
-  const octave = parseInt(octaveSelect.value) || 4;
-  return intervals.map(i => {
-    const note = NOTE_NAMES[(rootIdx + i) % 12];
-    const extraOct = Math.floor((rootIdx + i) / 12);
-    return noteToFreq(note, octave + extraOct);
-  });
+function stopNote() {
+  if (oscillator) { try { oscillator.stop() } catch(e) {}; oscillator = null; }
+  if (gainNode) gainNode.gain.value = 0;
 }
 
-// ─── Hand → wheel mapping ────────────────────────
-function getAngleFromCenter(landmark, width, height) {
-  // landmark x,y are normalized 0-1. Convert to canvas coords, center origin.
-  const cx = width / 2, cy = height * 0.45;
-  const dx = landmark.x * width - cx;
-  const dy = landmark.y * height - cy;
-  let angle = Math.atan2(dy, dx) * (180 / Math.PI);
-  if (angle < 0) angle += 360;
-  return angle;
-}
+// ─── Gesture ──────────────────────────────────────
+function isExtended(lm, tip, pip) { return lm[tip].y < lm[pip].y; }
 
-function angleToSegment(angle, numSegments, snap = true) {
-  const segSize = 360 / numSegments;
-  if (snap) {
-    return Math.floor(angle / segSize) % numSegments;
-  }
-  return (angle / segSize) % numSegments;
-}
-
-// ─── Gesture detection ────────────────────────────
-// Landmark indices: tip, pip for each finger
-const FINGERS = [
-  { name: 'thumb', tip: 4, pip: 2 },
-  { name: 'index', tip: 8, pip: 6 },
-  { name: 'middle', tip: 12, pip: 10 },
-  { name: 'ring', tip: 16, pip: 14 },
-  { name: 'pinky', tip: 20, pip: 18 },
-];
-
-function isFingerExtended(lm, tipIdx, pipIdx) {
-  // Finger is extended if tip is above PIP joint (lower y = higher on screen)
-  return lm[tipIdx].y < lm[pipIdx].y;
-}
-
-function getGesture(lm) {
-  const thumbUp = isFingerExtended(lm, 4, 2);
-  const indexUp = isFingerExtended(lm, 8, 6);
-  const middleUp = isFingerExtended(lm, 12, 10);
-  const ringUp = isFingerExtended(lm, 16, 14);
-  const pinkyUp = isFingerExtended(lm, 20, 18);
-  const count = (thumbUp?1:0) + (indexUp?1:0) + (middleUp?1:0) + (ringUp?1:0) + (pinkyUp?1:0);
-
-  if (count === 0) return { name: 'fist', quality: null, count: 0 };       // mute
-  if (count === 1 && indexUp) return { name: 'point', quality: 'root', count: 1 }; // single note
-  if (count === 2 && indexUp && middleUp && !ringUp) return { name: 'peace', quality: '5', count: 2 }; // power chord
-  if (count === 3 && indexUp && middleUp && ringUp && !pinkyUp) return { name: 'three', quality: 'maj', count: 3 };
-  if (count === 4 && !pinkyUp) return { name: 'four', quality: 'maj7', count: 4 };
-  if (count >= 4) return { name: 'open', quality: 'maj', count: count };
-
-  // Fallbacks
-  if (count >= 3) return { name: 'open', quality: 'maj', count: count };
-  if (count === 2) return { name: 'peace', quality: 'm', count: 2 };
-  return { name: 'point', quality: 'root', count: 1 };
+function countFingers(lm) {
+  return (isExtended(lm,4,2)?1:0) + (isExtended(lm,8,6)?1:0) +
+         (isExtended(lm,12,10)?1:0) + (isExtended(lm,16,14)?1:0) +
+         (isExtended(lm,20,18)?1:0);
 }
 
 // ─── Drawing ──────────────────────────────────────
-function drawWheel(cx, cy, radius, segments, labels, activeIdx, color) {
-  const segAngle = (2 * Math.PI) / segments;
-  for (let i = 0; i < segments; i++) {
-    const start = i * segAngle - Math.PI / 2;
-    const end = start + segAngle;
+function drawSkeleton(lm, w, h, color) {
+  const conns = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+    [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+    [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  conns.forEach(([a,b]) => {
     ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, radius, start, end);
-    ctx.closePath();
-    ctx.fillStyle = i === activeIdx ? color : 'rgba(255,255,255,0.04)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = 1;
+    ctx.moveTo(lm[a].x*w, lm[a].y*h);
+    ctx.lineTo(lm[b].x*w, lm[b].y*h);
     ctx.stroke();
+  });
+  lm.forEach(p => { ctx.beginPath(); ctx.arc(p.x*w, p.y*h, 3, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill(); });
+}
 
-    // Label
-    const midAngle = start + segAngle / 2;
-    const lx = cx + Math.cos(midAngle) * (radius * 0.68);
-    const ly = cy + Math.sin(midAngle) * (radius * 0.68);
-    ctx.fillStyle = i === activeIdx ? '#000' : 'rgba(255,255,255,0.7)';
-    ctx.font = `${i === activeIdx ? 'bold ' : ''}14px 'Segoe UI'`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(labels[i], lx, ly);
-  }
-  // Center dot
-  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-  ctx.fillStyle = color; ctx.fill();
+function drawBar(cx, w, top, h, pitch, volume) {
+  // Background
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.fillRect(cx - w/2, top, w, h);
+  // Volume fill
+  ctx.fillStyle = 'rgba(201,168,76,0.3)';
+  ctx.fillRect(cx - w/2, top, w * volume, h);
+  // Pitch line
+  const py = top + h * (1 - pitch);
+  ctx.strokeStyle = '#c9a84c'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx - w/2 - 6, py); ctx.lineTo(cx + w/2 + 6, py); ctx.stroke();
 }
 
 // ─── Main loop ────────────────────────────────────
 let lastTime = 0;
-let frameErrors = 0;
+const SMOOTH = 0.3; // smoothing factor (lower = smoother)
+
 async function processFrame() {
   try {
   if (!handLandmarker) { requestAnimationFrame(processFrame); return; }
@@ -356,260 +238,100 @@ async function processFrame() {
 
   const results = handLandmarker.detectForVideo(video, now);
   const w = canvas.width, h = canvas.height;
-
   ctx.clearRect(0, 0, w, h);
 
-  leftHand = null; rightHand = null;
-
   if (results.landmarks && results.landmarks.length > 0) {
-    // Scale config — same for all hands, lift out of forEach
-    const scale = scaleSelect.value;
-    const scaleNotes = getScaleNotes(scale);
-    const numNotes = scaleNotes.length;
+    const lm = results.landmarks[0]; // first hand only
+    const wrist = lm[0];
+    const fingers = countFingers(lm);
 
-    // Draw hand skeletons
-    results.landmarks.forEach((lm, hi) => {
-      const handedness = results.handedness?.[hi]?.[0];
-      const isLeft = handedness?.categoryName === 'Left' || handedness?.displayName === 'Left';
-      const isRight = handedness?.categoryName === 'Right' || handedness?.displayName === 'Right';
+    // Smooth pitch and volume
+    const rawPitch = 1.0 - wrist.y; // 0=bottom, 1=top
+    smoothPitch = smoothPitch + (rawPitch - smoothPitch) * SMOOTH;
+    const rawVol = fingers / 5;
+    smoothVol = smoothVol + (rawVol - smoothVol) * SMOOTH;
 
-      // Use wrist (landmark 0) for wheel position
-      const wrist = lm[0];
-      const angle = getAngleFromCenter(wrist, w, h);
+    // Map to note
+    const scaleNotes = getScaleNotes(scaleSelect.value);
+    const noteIdx = Math.floor(smoothPitch * scaleNotes.length);
+    const note = scaleNotes[Math.min(noteIdx, scaleNotes.length - 1)];
+    const octave = parseInt(octaveSelect.value) || 4;
+    const freq = noteToFreq(note, octave);
 
-      // Determine which hand
-      const handObj = { x: wrist.x, y: wrist.y, angle };
-      const gesture = getGesture(lm);
-      handObj.gesture = gesture;
-
-      // Left hand: height = pitch (higher hand = higher note)
-      //            openness = volume (open palm = loud, fist = quiet)
-      const handH = 1.0 - wrist.y; // 0=bottom, 1=top
-      const noteIdx = Math.floor(handH * numNotes);
-      handObj.note = scaleNotes[Math.min(noteIdx, numNotes - 1)] || 'C';
-      handObj.volume = gesture.count / 5; // 0 fingers=0, 5 fingers=1
-
-      // Right hand: gesture controls chord quality
-      handObj.quality = gesture.quality || 'maj';
-
-      // Assign based on handedness
-      if (isLeft && !leftHand) leftHand = handObj;
-      if (isRight && !rightHand) rightHand = handObj;
-      if (!isLeft && !isRight) {
-        // Fallback: first hand = left, second = right
-        if (!leftHand) leftHand = handObj;
-        else if (!rightHand) rightHand = handObj;
-      }
-
-      // Draw skeleton
-      const color = isLeft ? '#ff9944' : '#4499ff';
-      drawSkeleton(lm, w, h, ctx, color);
-    });
-
-    handsCount.textContent = `Hands: ${results.landmarks.length}`;
-
-    // Determine chord from hand gestures
-    const mode = modeSelect.value;
-    let rootNote = 'C', quality = 'maj', volume = 0.25;
-    let gestureName = '—';
-
-    if (mode === 'two-hand' && leftHand && rightHand) {
-      rootNote = leftHand.note;
-      quality = rightHand.gesture?.quality || 'maj';
-      volume = leftHand.volume || 0.25; // left hand openness = volume
-      gestureName = rightHand.gesture?.name || '?';
-    } else if (mode === 'melody' && rightHand) {
-      rootNote = rightHand.note;
-      quality = rightHand.gesture?.quality || 'maj';
-      volume = rightHand.volume || 0.25;
-      gestureName = rightHand.gesture?.name || '?';
-    } else if (leftHand) {
-      rootNote = leftHand.note;
-      quality = leftHand.gesture?.quality || 'maj';
-      volume = leftHand.volume || 0.25;
-      gestureName = leftHand.gesture?.name || '?';
+    // Audio
+    if (smoothVol < 0.05) {
+      stopNote();
+    } else if (!currentNote || currentNote.note !== note || Math.abs(currentNote.vol - smoothVol) > 0.03) {
+      playNote(freq, smoothVol);
+      currentNote = { note, vol: smoothVol, freq };
     }
 
-    // Fist = mute
-    if (quality === null) {
-      stopAllOscillators();
-      currentChord = null;
-      chordLabel.textContent = '🔇';
-      noteInfo.textContent = 'Gesture: fist';
-      freqInfo.textContent = 'muted';
-    } else {
-      const chordFreqs = getChordFreqs(rootNote, quality);
-      const chordName = `${rootNote}${quality === 'maj' ? '' : quality === 'root' ? '' : quality}`;
+    // Display
+    noteLabel.textContent = smoothVol < 0.05 ? '—' : note;
+    freqInfo.textContent = `Freq: ${Math.round(freq)} Hz`;
+    volInfo.textContent = `Vol: ${Math.round(smoothVol * 100)}%`;
 
-      chordLabel.textContent = chordName === currentChord?.name ? currentChord?.name : chordName;
-      if (chordName !== currentChord?.name || volume !== currentChord?.volume) {
-        currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs, volume };
-        chordLabel.textContent = chordName;
-        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName} vol:${Math.round(volume*100)}%`;
-        freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
-        playChord(chordFreqs, volume);
-      }
-    }
+    // Draw
+    drawSkeleton(lm, w, h, '#c9a84c');
+    drawBar(w * 0.85, 28, h * 0.1, h * 0.8, smoothPitch, smoothVol);
 
-    // Left hand: vertical pitch bar
-    const barX = w * 0.2, barW = 28, barTop = h * 0.1, barH = h * 0.75;
-    if (leftHand) {
-      // Volume bar (width of bar = openness)
-      const volW = barW * leftHand.volume;
-      ctx.fillStyle = 'rgba(255,153,68,0.15)';
-      ctx.fillRect(barX, barTop, barW, barH);
-      ctx.fillStyle = 'rgba(255,153,68,0.6)';
-      ctx.fillRect(barX, barTop, volW, barH);
-      // Pitch indicator (hand height)
-      const pitch = 1.0 - leftHand.y; // 0=bottom, 1=top
-      const py = barTop + barH * (1 - pitch);
-      ctx.fillStyle = '#ff9944';
-      ctx.fillRect(barX - 4, py - 3, barW + 8, 6);
-      // Labels
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.font = '10px system-ui';
-      ctx.textAlign = 'center';
-      ctx.fillText(scaleNotes[numNotes-1] || '?', barX + barW/2, barTop - 4);
-      ctx.fillText(scaleNotes[0] || '?', barX + barW/2, barTop + barH + 14);
-      ctx.fillText(leftHand.note, barX + barW/2, py - 8);
-    }
+    // Scale labels on bar
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '10px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(scaleNotes[scaleNotes.length-1], w*0.85, h*0.1 - 4);
+    ctx.fillText(scaleNotes[0], w*0.85, h*0.1 + h*0.8 + 14);
+    ctx.fillStyle = '#c9a84c'; ctx.font = 'bold 16px system-ui';
+    ctx.fillText(note, w*0.85, h*0.1 + h*0.8*(1-smoothPitch) - 12);
 
-    const cxR = w * 0.72, cyW = h * 0.42;
-    // Right hand: show gesture label
-    if (rightHand) {
-      const g = rightHand.gesture;
-      ctx.fillStyle = '#4499ff';
-      ctx.font = 'bold 20px system-ui';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(g?.name || '?', cxR, cyW);
-      ctx.font = '11px system-ui';
-      ctx.fillStyle = 'rgba(68,153,255,0.7)';
-      ctx.fillText(`${g?.count || 0} fingers`, cxR, cyW + 22);
-    }
   } else {
-    handsCount.textContent = 'Hands: 0';
-    chordLabel.textContent = '—';
-    noteInfo.textContent = 'Note: —';
+    noteLabel.textContent = '—';
     freqInfo.textContent = 'Freq: — Hz';
-    stopAllOscillators();
-    currentChord = null;
+    volInfo.textContent = 'Vol: —%';
+    stopNote();
+    currentNote = null;
   }
 
   requestAnimationFrame(processFrame);
   } catch (err) {
-    frameErrors++;
-    console.warn('Frame error #' + frameErrors + ':', err.message);
-    // Keep the loop alive — don't let one bad frame kill everything
-    if (frameErrors <= 3) {
-      statusEl.textContent = '⚠️ err: ' + err.message.slice(0, 30);
-    }
+    console.warn('Frame:', err.message);
     requestAnimationFrame(processFrame);
   }
-}
-
-function drawSkeleton(landmarks, w, h, ctx, color) {
-  const connections = [
-    [0,1],[1,2],[2,3],[3,4],   // thumb
-    [0,5],[5,6],[6,7],[7,8],   // index
-    [0,9],[9,10],[10,11],[11,12], // middle
-    [0,13],[13,14],[14,15],[15,16], // ring
-    [0,17],[17,18],[18,19],[19,20], // pinky
-    [5,9],[9,13],[13,17],       // palm
-  ];
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  connections.forEach(([a,b]) => {
-    const ax = landmarks[a].x * w, ay = landmarks[a].y * h;
-    const bx = landmarks[b].x * w, by = landmarks[b].y * h;
-    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-  });
-  // Landmark dots
-  landmarks.forEach(lm => {
-    ctx.beginPath();
-    ctx.arc(lm.x * w, lm.y * h, 3, 0, Math.PI*2);
-    ctx.fillStyle = color; ctx.fill();
-  });
 }
 
 // ─── Boot ─────────────────────────────────────────
 async function init() {
   const setStatus = (msg, cls) => { statusEl.textContent = msg; if (cls) statusEl.className = cls; };
-
   try {
     setStatus('📷 camera…');
     window._airChord?.progress({pct:10, msg:'camera…'});
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: 640, height: 480 }
-    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } });
     video.srcObject = stream;
     await video.play();
-
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
-    // Mirror canvas to match mirrored video
     canvas.style.transform = 'scaleX(-1)';
 
-    setStatus('📦 loading mediapipe…');
-    window._airChord?.progress({pct:30, msg:'downloading wasm…'});
-    const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
-    );
+    setStatus('📦 loading…');
+    window._airChord?.progress({pct:30, msg:'wasm…'});
+    const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm');
 
-    setStatus('🧠 loading hand model…');
-    window._airChord?.progress({pct:50, msg:'loading model…'});
-    // Try CPU first (phones often lack WebGPU), GPU as fallback
-    let delegate = 'CPU';
-    try {
-      handLandmarker = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-          delegate: 'CPU',
-        },
-        runningMode: 'VIDEO',
-        numHands: 2,
-      });
-      console.log('HandLandmarker: CPU');
-    } catch (cpuErr) {
-      console.warn('CPU failed, trying GPU:', cpuErr);
-      handLandmarker = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-          delegate: 'GPU',
-        },
-        runningMode: 'VIDEO',
-        numHands: 2,
-      });
-      delegate = 'GPU';
-      console.log('HandLandmarker: GPU');
-    }
+    setStatus('🧠 model…');
+    window._airChord?.progress({pct:60, msg:'model…'});
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+        delegate: 'CPU',
+      },
+      runningMode: 'VIDEO', numHands: 2,
+    });
 
-    // Quick smoke test: run one detection to verify model works
-    setStatus('🔍 testing detection…');
-    window._airChord?.progress({pct:85, msg:'testing…'});
-    const testResult = handLandmarker.detectForVideo(video, performance.now());
-    const detected = testResult.landmarks?.length || 0;
-    console.log('Smoke test:', detected, 'hands detected');
-
-    setStatus(detected > 0 ? `✅ ready — tap audio` : `⚠️ no hands (${delegate}) — tap audio`, detected > 0 ? 'active' : '');
-    window._airChord?.progress({pct:100, msg: detected > 0 ? 'ready' : 'no hands detected'});
-    // Hide loading bar after 1s
-    setTimeout(() => {
-      const wrap = document.getElementById('loading-bar-wrap');
-      if (wrap) wrap.style.display = 'none';
-    }, 1000);
+    setStatus('✅ ready — tap audio', 'active');
+    window._airChord?.progress({pct:100, msg:'ready'});
+    setTimeout(() => { const w = document.getElementById('loading-bar-wrap'); if (w) w.style.display = 'none'; }, 1000);
     requestAnimationFrame(processFrame);
   } catch (err) {
     setStatus('❌ ' + err.message);
     console.error(err);
-    // Show full error on screen
-    const dp = document.getElementById('data-panel');
-    if (dp) {
-      const pre = document.createElement('pre');
-      pre.style.cssText = 'font-size:10px;color:#f66;margin-top:8px;white-space:pre-wrap';
-      pre.textContent = err.stack || err.message;
-      dp.appendChild(pre);
-    }
   }
 }
 
