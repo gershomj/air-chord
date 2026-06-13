@@ -382,9 +382,18 @@ async function processFrame() {
       const gesture = getGesture(lm);
       handObj.gesture = gesture;
 
-      // Note wheel (left hand angle → note)
-      const noteIdx = angleToSegment(angle, numNotes, snapCheck.checked);
-      handObj.note = scaleNotes[noteIdx] || 'C';
+      // Note wheel — left hand: palm open = lower 5, fist/closed = upper notes
+      const palmOpen = gesture.count >= 3;
+      const SPLIT = 5;
+      const lowNotes = scaleNotes.slice(0, SPLIT);
+      const highNotes = scaleNotes.slice(SPLIT);
+      const activeNotes = palmOpen ? lowNotes : (highNotes.length ? highNotes : lowNotes);
+      const activeNum = activeNotes.length;
+      const noteIdx = angleToSegment(angle, activeNum, snapCheck.checked);
+      handObj.note = activeNotes[noteIdx] || 'C';
+      handObj.noteBank = palmOpen ? 'low' : 'high';
+      handObj.activeNotes = activeNotes;
+      handObj.activeNum = activeNum;
 
       // Right hand: gesture controls chord quality, height controls volume
       handObj.quality = gesture.quality || 'maj';
@@ -443,16 +452,23 @@ async function processFrame() {
       if (chordName !== currentChord?.name || volume !== currentChord?.volume) {
         currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs, volume };
         chordLabel.textContent = chordName;
-        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName}`;
+        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName} [${leftHand?.noteBank === 'high' ? 'HI' : 'LO'}]`;
         freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
         playChord(chordFreqs, volume);
       }
     }
 
-    // Draw wheels
+    // Draw left wheel with active note bank
     const cxL = w * 0.28, cxR = w * 0.72, cyW = h * 0.42, rad = Math.min(w * 0.2, h * 0.22);
-    if (leftHand) drawWheel(cxL, cyW, rad, numNotes, scaleNotes,
-      angleToSegment(leftHand.angle, numNotes, snapCheck.checked), 'rgba(255,153,68,0.5)');
+    if (leftHand && leftHand.activeNotes) {
+      drawWheel(cxL, cyW, rad, leftHand.activeNum, leftHand.activeNotes,
+        angleToSegment(leftHand.angle, leftHand.activeNum, snapCheck.checked), 'rgba(255,153,68,0.5)');
+      // Show which bank
+      ctx.fillStyle = 'rgba(255,153,68,0.8)';
+      ctx.font = '10px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(leftHand.noteBank === 'low' ? 'LO' : 'HI', cxL, cyW + rad + 16);
+    }
     // Right hand: show gesture label instead of wheel
     if (rightHand) {
       const g = rightHand.gesture;
