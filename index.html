@@ -305,7 +305,9 @@ function drawWheel(cx, cy, radius, segments, labels, activeIdx, color) {
 
 // ─── Main loop ────────────────────────────────────
 let lastTime = 0;
+let frameErrors = 0;
 async function processFrame() {
+  try {
   if (!handLandmarker) { requestAnimationFrame(processFrame); return; }
 
   const now = performance.now();
@@ -403,6 +405,15 @@ async function processFrame() {
   }
 
   requestAnimationFrame(processFrame);
+  } catch (err) {
+    frameErrors++;
+    console.warn('Frame error #' + frameErrors + ':', err.message);
+    // Keep the loop alive — don't let one bad frame kill everything
+    if (frameErrors <= 3) {
+      statusEl.textContent = '⚠️ err: ' + err.message.slice(0, 30);
+    }
+    requestAnimationFrame(processFrame);
+  }
 }
 
 function drawSkeleton(landmarks, w, h, ctx, color) {
