@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Air Chord — Gesture Instrument</title>
+<style>
+  :root { --bg: #0a0a0f; --panel: #111118; --gold: #c9a84c; --text: #e0e0e0; --muted: #888; }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden; height: 100dvh; width: 100vw;
+    display: flex; flex-direction: column;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none;
+  }
+
+  /* --- Header --- */
+  #header {
+    padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;
+    background: var(--panel); border-bottom: 1px solid #222; z-index: 10;
+    font-size: 14px; letter-spacing: .5px;
+  }
+  #header .title { font-weight: 600; color: var(--gold); }
+  #status { font-size: 12px; padding: 3px 8px; border-radius: 10px; background: #222; }
+  #status.active { background: #1a3a1a; color: #4f4; }
+
+  /* --- Camera --- */
+  #camera-wrap {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+
+  /* --- Controls --- */
+  #controls {
+    display: flex; gap: 8px; padding: 10px 12px;
+    background: var(--panel); border-top: 1px solid #222;
+    flex-wrap: wrap; align-items: center; z-index: 10; font-size: 13px;
+  }
+  #controls select, #controls button {
+    background: #1a1a24; color: var(--text); border: 1px solid #333;
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  }
+  #controls button { background: var(--gold); color: #000; border: none; font-weight: 600; }
+  #controls button:active { opacity: .8; }
+  #controls label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+  #controls input[type=checkbox] { accent-color: var(--gold); }
+
+  /* --- Data overlay --- */
+  #data-panel {
+    position: absolute; top: 12px; right: 12px; z-index: 20;
+    background: rgba(0,0,0,.65); padding: 10px 14px; border-radius: 10px;
+    font-size: 12px; line-height: 1.6; backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.08); min-width: 100px;
+  }
+  #data-panel .chord-display { font-size: 28px; font-weight: 700; color: var(--gold); }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <span class="title">◆ Air Chord</span>
+  <span id="status">initializing…</span>
+</div>
+
+<div id="camera-wrap">
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="overlay"></div>
+  <div id="data-panel">
+    <div id="chord-label" class="chord-display">—</div>
+    <div id="hands-count">Hands: 0</div>
+    <div id="note-info" style="color:var(--muted)">Note: —</div>
+    <div id="freq-info" style="color:var(--muted)">Freq: — Hz</div>
+  </div>
+</div>
+
+<div id="controls">
+  <label>Mode
+    <select id="mode-select">
+      <option value="two-hand">Two-hand Chord</option>
+      <option value="melody">Melody (R-hand)</option>
+    </select>
+  </label>
+  <label>Scale
+    <select id="scale-select">
+      <option value="major">Major</option>
+      <option value="minor">Minor</option>
+      <option value="chromatic">Chromatic</option>
+    </select>
+  </label>
+  <label>Wave
+    <select id="wave-select">
+      <option value="sine">Sine</option>
+      <option value="triangle">Triangle</option>
+      <option value="square">Square</option>
+      <option value="sawtooth">Sawtooth</option>
+    </select>
+  </label>
+  <label>Oct
+    <select id="octave-select">
+      <option value="3">Oct 3</option>
+      <option value="4" selected>Oct 4</option>
+      <option value="5">Oct 5</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="snap-check" checked> Snap</label>
+  <button id="toggle-audio">🔇 Start Audio</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm"
+}}
+</script>
+<script type="module">
+import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+
+// ─── DOM refs ────────────────────────────────────
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const chordLabel = document.getElementById('chord-label');
+const handsCount = document.getElementById('hands-count');
+const noteInfo = document.getElementById('note-info');
+const freqInfo = document.getElementById('freq-info');
+const toggleBtn = document.getElementById('toggle-audio');
+const modeSelect = document.getElementById('mode-select');
+const scaleSelect = document.getElementById('scale-select');
+const waveSelect = document.getElementById('wave-select');
+const octaveSelect = document.getElementById('octave-select');
+const snapCheck = document.getElementById('snap-check');
+
+// ─── State ───────────────────────────────────────
+let handLandmarker = null;
+let audioCtx = null;
+let oscillators = [];
+let gainNode = null;
+let audioStarted = false;
+let leftHand = null;   // { x, y, note }
+let rightHand = null;  // { x, y, quality }
+let currentChord = null; // { root, quality, freqs }
+
+// ─── Note definitions ────────────────────────────
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];     // C D E F G A B
+const MAJOR_NOTE_NAMES = ['C','D','E','F','G','A','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];     // C D Eb F G Ab Bb
+const MINOR_NOTE_NAMES = ['C','D','Eb','F','G','Ab','Bb'];
+const CHROMATIC = [0,1,2,3,4,5,6,7,8,9,10,11];
+
+const CHORD_QUALITIES = ['maj','maj7','7','m','m7','dim','aug','sus4'];
+
+// Chord formulas (semitones from root)
+const CHORD_INTERVALS = {
+  maj:   [0, 4, 7],
+  maj7:  [0, 4, 7, 11],
+  7:     [0, 4, 7, 10],
+  m:     [0, 3, 7],
+  m7:    [0, 3, 7, 10],
+  dim:   [0, 3, 6],
+  aug:   [0, 4, 8],
+  sus4:  [0, 5, 7],
+};
+
+function noteToFreq(note, octave = 4) {
+  const idx = NOTE_NAMES.indexOf(note);
+  if (idx === -1) return 261.63; // default C4
+  const a4 = 440;
+  const a4_idx = NOTE_NAMES.indexOf('A');
+  const semitones = idx - a4_idx + (octave - 4) * 12;
+  return a4 * Math.pow(2, semitones / 12);
+}
+
+function getScaleNotes(scale) {
+  if (scale === 'major') return MAJOR_NOTE_NAMES;
+  if (scale === 'minor') return MINOR_NOTE_NAMES;
+  return NOTE_NAMES;
+}
+
+function getScaleIntervals(scale) {
+  if (scale === 'major') return MAJOR_SCALE;
+  if (scale === 'minor') return MINOR_SCALE;
+  return CHROMATIC;
+}
+
+// ─── Audio engine ────────────────────────────────
+async function startAudio() {
+  if (audioStarted) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  gainNode = audioCtx.createGain();
+  gainNode.gain.value = 0.15;
+  gainNode.connect(audioCtx.destination);
+  audioStarted = true;
+  toggleBtn.textContent = '🔊 Live';
+  statusEl.textContent = 'ready';
+  statusEl.className = 'active';
+}
+
+function stopAllOscillators() {
+  oscillators.forEach(o => { try { o.stop() } catch(e) {} });
+  oscillators = [];
+}
+
+function playChord(freqs) {
+  if (!audioStarted) return;
+  stopAllOscillators();
+  const waveType = waveSelect.value;
+  freqs.forEach(f => {
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = waveType;
+    osc.frequency.value = f;
+    g.gain.value = 0.25;
+    osc.connect(g);
+    g.connect(gainNode);
+    osc.start();
+    oscillators.push(osc);
+  });
+}
+
+function getChordFreqs(rootNote, quality) {
+  const intervals = CHORD_INTERVALS[quality] || CHORD_INTERVALS.maj;
+  const rootIdx = NOTE_NAMES.indexOf(rootNote);
+  if (rootIdx === -1) return [261.63];
+  const octave = parseInt(octaveSelect.value) || 4;
+  return intervals.map(i => {
+    const note = NOTE_NAMES[(rootIdx + i) % 12];
+    const extraOct = Math.floor((rootIdx + i) / 12);
+    return noteToFreq(note, octave + extraOct);
+  });
+}
+
+// ─── Hand → wheel mapping ────────────────────────
+function getAngleFromCenter(landmark, width, height) {
+  // landmark x,y are normalized 0-1. Convert to canvas coords, center origin.
+  const cx = width / 2, cy = height * 0.45;
+  const dx = landmark.x * width - cx;
+  const dy = landmark.y * height - cy;
+  let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+  if (angle < 0) angle += 360;
+  return angle;
+}
+
+function angleToSegment(angle, numSegments, snap = true) {
+  const segSize = 360 / numSegments;
+  if (snap) {
+    return Math.floor(angle / segSize) % numSegments;
+  }
+  return (angle / segSize) % numSegments;
+}
+
+// ─── Drawing ──────────────────────────────────────
+function drawWheel(cx, cy, radius, segments, labels, activeIdx, color) {
+  const segAngle = (2 * Math.PI) / segments;
+  segments.forEach((_, i) => {
+    const start = i * segAngle - Math.PI / 2;
+    const end = start + segAngle;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, start, end);
+    ctx.closePath();
+    ctx.fillStyle = i === activeIdx ? color : 'rgba(255,255,255,0.04)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Label
+    const midAngle = start + segAngle / 2;
+    const lx = cx + Math.cos(midAngle) * (radius * 0.68);
+    const ly = cy + Math.sin(midAngle) * (radius * 0.68);
+    ctx.fillStyle = i === activeIdx ? '#000' : 'rgba(255,255,255,0.7)';
+    ctx.font = `${i === activeIdx ? 'bold ' : ''}14px 'Segoe UI'`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labels[i], lx, ly);
+  });
+  // Center dot
+  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = color; ctx.fill();
+}
+
+// ─── Main loop ────────────────────────────────────
+let lastTime = 0;
+async function processFrame() {
+  if (!handLandmarker) { requestAnimationFrame(processFrame); return; }
+
+  const now = performance.now();
+  if (now - lastTime < 50) { requestAnimationFrame(processFrame); return; }
+  lastTime = now;
+
+  const results = handLandmarker.detectForVideo(video, now);
+
+  // Debug: log detection results every ~2 seconds
+  if (Math.floor(now / 2000) !== Math.floor((now - 50) / 2000)) {
+    console.log('detectForVideo:', {
+      hasLandmarks: !!results.landmarks,
+      count: results.landmarks?.length || 0,
+      handedness: results.handedness?.map(h => h[0]?.categoryName) || [],
+      videoReady: video.readyState,
+      videoDims: `${video.videoWidth}x${video.videoHeight}`,
+      delegate: statusEl.textContent.includes('GPU') ? 'GPU' : 'CPU',
+    });
+  }
+
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  leftHand = null; rightHand = null;
+
+  if (results.landmarks && results.landmarks.length > 0) {
+    // Draw hand skeletons
+    results.landmarks.forEach((lm, hi) => {
+      const handedness = results.handedness?.[hi]?.[0];
+      const isLeft = handedness?.categoryName === 'Left' || handedness?.displayName === 'Left';
+      const isRight = handedness?.categoryName === 'Right' || handedness?.displayName === 'Right';
+
+      // Use wrist (landmark 0) for wheel position
+      const wrist = lm[0];
+      const angle = getAngleFromCenter(wrist, w, h);
+
+      // Determine which hand
+      const handObj = { x: wrist.x, y: wrist.y, angle };
+
+      // Note wheel (left hand) or melody
+      const scale = scaleSelect.value;
+      const scaleNotes = getScaleNotes(scale);
+      const numNotes = scaleNotes.length;
+      const noteIdx = angleToSegment(angle, numNotes, snapCheck.checked);
+      handObj.note = scaleNotes[noteIdx] || 'C';
+
+      // Chord quality wheel (right hand)
+      const qualityIdx = angleToSegment(angle, CHORD_QUALITIES.length, snapCheck.checked);
+      handObj.quality = CHORD_QUALITIES[qualityIdx];
+
+      // Assign based on handedness
+      if (isLeft && !leftHand) leftHand = handObj;
+      if (isRight && !rightHand) rightHand = handObj;
+      if (!isLeft && !isRight) {
+        // Fallback: first hand = left, second = right
+        if (!leftHand) leftHand = handObj;
+        else if (!rightHand) rightHand = handObj;
+      }
+
+      // Draw skeleton
+      const color = isLeft ? '#ff9944' : '#4499ff';
+      drawSkeleton(lm, w, h, ctx, color);
+    });
+
+    handsCount.textContent = `Hands: ${results.landmarks.length}`;
+
+    // Determine chord
+    const mode = modeSelect.value;
+    let rootNote = 'C', quality = 'maj';
+
+    if (mode === 'two-hand' && leftHand && rightHand) {
+      rootNote = leftHand.note;
+      quality = rightHand.quality;
+    } else if (mode === 'melody' && rightHand) {
+      rootNote = rightHand.note;
+      quality = 'maj';
+    } else if (leftHand) {
+      rootNote = leftHand.note;
+      quality = 'maj';
+    }
+
+    const chordFreqs = getChordFreqs(rootNote, quality);
+    const chordName = `${rootNote}${quality === 'maj' ? '' : quality}`;
+
+    chordLabel.textContent = chordName === currentChord?.name ? currentChord?.name : chordName;
+    if (chordName !== currentChord?.name) {
+      currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs };
+      chordLabel.textContent = chordName;
+      noteInfo.textContent = `Note: ${rootNote} (${quality})`;
+      freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
+      playChord(chordFreqs);
+    }
+
+    // Draw wheels
+    const cxL = w * 0.28, cxR = w * 0.72, cyW = h * 0.42, rad = Math.min(w * 0.2, h * 0.22);
+    if (leftHand) drawWheel(cxL, cyW, rad, numNotes, scaleNotes,
+      angleToSegment(leftHand.angle, numNotes, snapCheck.checked), 'rgba(255,153,68,0.5)');
+    if (rightHand) drawWheel(cxR, cyW, rad, CHORD_QUALITIES.length, CHORD_QUALITIES,
+      angleToSegment(rightHand.angle, CHORD_QUALITIES.length, snapCheck.checked), 'rgba(68,153,255,0.5)');
+  } else {
+    handsCount.textContent = 'Hands: 0';
+    chordLabel.textContent = '—';
+    noteInfo.textContent = 'Note: —';
+    freqInfo.textContent = 'Freq: — Hz';
+    stopAllOscillators();
+    currentChord = null;
+  }
+
+  requestAnimationFrame(processFrame);
+}
+
+function drawSkeleton(landmarks, w, h, ctx, color) {
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4],   // thumb
+    [0,5],[5,6],[6,7],[7,8],   // index
+    [0,9],[9,10],[10,11],[11,12], // middle
+    [0,13],[13,14],[14,15],[15,16], // ring
+    [0,17],[17,18],[18,19],[19,20], // pinky
+    [5,9],[9,13],[13,17],       // palm
+  ];
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  connections.forEach(([a,b]) => {
+    const ax = landmarks[a].x * w, ay = landmarks[a].y * h;
+    const bx = landmarks[b].x * w, by = landmarks[b].y * h;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  });
+  // Landmark dots
+  landmarks.forEach(lm => {
+    ctx.beginPath();
+    ctx.arc(lm.x * w, lm.y * h, 3, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+  });
+}
+
+// ─── Boot ─────────────────────────────────────────
+async function init() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } });
+    video.srcObject = stream;
+    await video.play();
+
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+
+    statusEl.textContent = 'loading model…';
+
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+    );
+
+    // Try GPU first, fall back to CPU
+    let delegate = 'GPU';
+    try {
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+      });
+      console.log('HandLandmarker initialized with GPU delegate');
+    } catch (gpuErr) {
+      console.warn('GPU delegate failed, falling back to CPU:', gpuErr);
+      delegate = 'CPU';
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+          delegate: 'CPU',
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+      });
+    }
+
+    statusEl.textContent = `ready (${delegate}) — tap audio`;
+    requestAnimationFrame(processFrame);
+  } catch (err) {
+    statusEl.textContent = 'error: ' + err.message;
+    console.error(err);
+  }
+}
+
+toggleBtn.addEventListener('click', startAudio);
+init();
+</script>
+</body>
+</html>
