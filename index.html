@@ -208,12 +208,14 @@ function getScaleIntervals(scale) {
 async function startAudio() {
   if (audioStarted) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // iOS Safari may suspend the context even after user gesture
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0.15;
   gainNode.connect(audioCtx.destination);
   audioStarted = true;
   toggleBtn.textContent = '🔊 Live';
-  statusEl.textContent = 'ready';
+  statusEl.textContent = 'live';
   statusEl.className = 'active';
 }
 
@@ -307,7 +309,7 @@ async function processFrame() {
   if (!handLandmarker) { requestAnimationFrame(processFrame); return; }
 
   const now = performance.now();
-  if (now - lastTime < 50) { requestAnimationFrame(processFrame); return; }
+  if (now - lastTime < 33) { requestAnimationFrame(processFrame); return; }
   lastTime = now;
 
   const results = handLandmarker.detectForVideo(video, now);
@@ -442,6 +444,8 @@ async function init() {
 
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 480;
+    // Mirror canvas to match mirrored video
+    canvas.style.transform = 'scaleX(-1)';
 
     setStatus('📦 loading mediapipe…');
     window._airChord?.progress({pct:30, msg:'downloading wasm…'});
