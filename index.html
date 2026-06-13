@@ -275,7 +275,7 @@ function angleToSegment(angle, numSegments, snap = true) {
 // ─── Drawing ──────────────────────────────────────
 function drawWheel(cx, cy, radius, segments, labels, activeIdx, color) {
   const segAngle = (2 * Math.PI) / segments;
-  segments.forEach((_, i) => {
+  for (let i = 0; i < segments; i++) {
     const start = i * segAngle - Math.PI / 2;
     const end = start + segAngle;
     ctx.beginPath();
@@ -297,7 +297,7 @@ function drawWheel(cx, cy, radius, segments, labels, activeIdx, color) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(labels[i], lx, ly);
-  });
+  }
   // Center dot
   ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2);
   ctx.fillStyle = color; ctx.fill();
