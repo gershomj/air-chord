@@ -322,6 +322,11 @@ async function processFrame() {
   leftHand = null; rightHand = null;
 
   if (results.landmarks && results.landmarks.length > 0) {
+    // Scale config — same for all hands, lift out of forEach
+    const scale = scaleSelect.value;
+    const scaleNotes = getScaleNotes(scale);
+    const numNotes = scaleNotes.length;
+
     // Draw hand skeletons
     results.landmarks.forEach((lm, hi) => {
       const handedness = results.handedness?.[hi]?.[0];
@@ -336,9 +341,6 @@ async function processFrame() {
       const handObj = { x: wrist.x, y: wrist.y, angle };
 
       // Note wheel (left hand) or melody
-      const scale = scaleSelect.value;
-      const scaleNotes = getScaleNotes(scale);
-      const numNotes = scaleNotes.length;
       const noteIdx = angleToSegment(angle, numNotes, snapCheck.checked);
       handObj.note = scaleNotes[noteIdx] || 'C';
 
