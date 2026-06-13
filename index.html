@@ -136,9 +136,10 @@ let audioCtx = null;
 let oscillator = null;
 let gainNode = null;
 let audioStarted = false;
-let currentNote = null;
+let currentFreq = 0;
 let smoothVol = 0;
 let smoothPitch = 0.5;
+let smoothBend = 0; // pitch bend (-1 to +1)
 
 // ─── Note definitions ─────────────────────────────
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -157,7 +158,7 @@ function noteToFreq(note, octave = 4) {
   return 440 * Math.pow(2, (idx - NOTE_NAMES.indexOf('A') + (octave - 4) * 12) / 12);
 }
 
-// ─── Audio ────────────────────────────────────────
+// ─── Audio (smooth — no clicks) ───────────────────
 async function startAudio() {
   if (audioStarted) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -165,26 +166,33 @@ async function startAudio() {
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0;
   gainNode.connect(audioCtx.destination);
+  // Create one persistent oscillator — never stop it, just change freq
+  oscillator = audioCtx.createOscillator();
+  oscillator.type = waveSelect.value;
+  oscillator.frequency.value = 261;
+  oscillator.connect(gainNode);
+  oscillator.start();
   audioStarted = true;
   toggleBtn.textContent = '🔊 Live';
   statusEl.textContent = 'live';
   statusEl.className = 'active';
 }
 
-function playNote(freq, volume) {
+function updateSound(freq, volume) {
   if (!audioStarted) return;
-  if (oscillator) { try { oscillator.stop() } catch(e) {} }
-  oscillator = audioCtx.createOscillator();
-  oscillator.type = waveSelect.value;
-  oscillator.frequency.value = freq;
-  oscillator.connect(gainNode);
-  oscillator.start();
-  gainNode.gain.value = volume * 0.4;
+  const t = audioCtx.currentTime;
+  // Smooth frequency transition (no click)
+  oscillator.frequency.setTargetAtTime(freq, t, 0.03);
+  // Smooth volume ramp
+  gainNode.gain.setTargetAtTime(volume * 0.4, t, 0.03);
+  // Update wave type if changed
+  if (oscillator.type !== waveSelect.value) oscillator.type = waveSelect.value;
+  currentFreq = freq;
 }
 
-function stopNote() {
-  if (oscillator) { try { oscillator.stop() } catch(e) {}; oscillator = null; }
-  if (gainNode) gainNode.gain.value = 0;
+function silenceSound() {
+  if (!audioStarted) return;
+  gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
 }
 
 // ─── Gesture ──────────────────────────────────────
@@ -245,30 +253,34 @@ async function processFrame() {
     const wrist = lm[0];
     const fingers = countFingers(lm);
 
-    // Smooth pitch and volume
+    // Smooth pitch (Y), volume (fingers), and bend (X)
     const rawPitch = 1.0 - wrist.y; // 0=bottom, 1=top
     smoothPitch = smoothPitch + (rawPitch - smoothPitch) * SMOOTH;
     const rawVol = fingers / 5;
     smoothVol = smoothVol + (rawVol - smoothVol) * SMOOTH;
+    // Horizontal = pitch bend (±2 semitones like a mod wheel)
+    const rawBend = (wrist.x - 0.5) * 2; // -1 (left) to +1 (right)
+    smoothBend = smoothBend + (rawBend - smoothBend) * SMOOTH * 0.5;
 
-    // Map to note
+    // Map to note + bend
     const scaleNotes = getScaleNotes(scaleSelect.value);
     const noteIdx = Math.floor(smoothPitch * scaleNotes.length);
     const note = scaleNotes[Math.min(noteIdx, scaleNotes.length - 1)];
     const octave = parseInt(octaveSelect.value) || 4;
-    const freq = noteToFreq(note, octave);
+    const baseFreq = noteToFreq(note, octave);
+    const bendSemitones = smoothBend * 2; // ±2 semitones
+    const freq = baseFreq * Math.pow(2, bendSemitones / 12);
 
     // Audio
-    if (smoothVol < 0.05) {
-      stopNote();
-    } else if (!currentNote || currentNote.note !== note || Math.abs(currentNote.vol - smoothVol) > 0.03) {
-      playNote(freq, smoothVol);
-      currentNote = { note, vol: smoothVol, freq };
+    if (smoothVol < 0.02) {
+      silenceSound();
+    } else if (Math.abs(currentFreq - freq) > 0.5 || smoothVol > 0.02) {
+      updateSound(freq, smoothVol);
     }
 
     // Display
-    noteLabel.textContent = smoothVol < 0.05 ? '—' : note;
-    freqInfo.textContent = `Freq: ${Math.round(freq)} Hz`;
+    noteLabel.textContent = smoothVol < 0.02 ? '—' : note;
+    freqInfo.textContent = `Freq: ${Math.round(freq)} Hz${bendSemitones !== 0 ? ' ↕'+bendSemitones.toFixed(1) : ''}`;
     volInfo.textContent = `Vol: ${Math.round(smoothVol * 100)}%`;
 
     // Draw
@@ -287,8 +299,7 @@ async function processFrame() {
     noteLabel.textContent = '—';
     freqInfo.textContent = 'Freq: — Hz';
     volInfo.textContent = 'Vol: —%';
-    stopNote();
-    currentNote = null;
+    silenceSound();
   }
 
   requestAnimationFrame(processFrame);
