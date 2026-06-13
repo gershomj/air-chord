@@ -173,14 +173,16 @@ const CHORD_QUALITIES = ['maj','maj7','7','m','m7','dim','aug','sus4'];
 
 // Chord formulas (semitones from root)
 const CHORD_INTERVALS = {
-  maj:   [0, 4, 7],
-  maj7:  [0, 4, 7, 11],
-  7:     [0, 4, 7, 10],
-  m:     [0, 3, 7],
-  m7:    [0, 3, 7, 10],
-  dim:   [0, 3, 6],
-  aug:   [0, 4, 8],
-  sus4:  [0, 5, 7],
+  root: [0],           // single note
+  5:    [0, 7],        // power chord
+  maj:  [0, 4, 7],
+  maj7: [0, 4, 7, 11],
+  7:    [0, 4, 7, 10],
+  m:    [0, 3, 7],
+  m7:   [0, 3, 7, 10],
+  dim:  [0, 3, 6],
+  aug:  [0, 4, 8],
+  sus4: [0, 5, 7],
 };
 
 function noteToFreq(note, octave = 4) {
@@ -224,9 +226,11 @@ function stopAllOscillators() {
   oscillators = [];
 }
 
-function playChord(freqs) {
+function playChord(freqs, volume = 0.25) {
   if (!audioStarted) return;
   stopAllOscillators();
+  // Apply hand-height volume to master gain
+  if (gainNode) gainNode.gain.value = Math.max(0.02, volume * 0.8);
   const waveType = waveSelect.value;
   freqs.forEach(f => {
     const osc = audioCtx.createOscillator();
@@ -270,6 +274,42 @@ function angleToSegment(angle, numSegments, snap = true) {
     return Math.floor(angle / segSize) % numSegments;
   }
   return (angle / segSize) % numSegments;
+}
+
+// ─── Gesture detection ────────────────────────────
+// Landmark indices: tip, pip for each finger
+const FINGERS = [
+  { name: 'thumb', tip: 4, pip: 2 },
+  { name: 'index', tip: 8, pip: 6 },
+  { name: 'middle', tip: 12, pip: 10 },
+  { name: 'ring', tip: 16, pip: 14 },
+  { name: 'pinky', tip: 20, pip: 18 },
+];
+
+function isFingerExtended(lm, tipIdx, pipIdx) {
+  // Finger is extended if tip is above PIP joint (lower y = higher on screen)
+  return lm[tipIdx].y < lm[pipIdx].y;
+}
+
+function getGesture(lm) {
+  const thumbUp = isFingerExtended(lm, 4, 2);
+  const indexUp = isFingerExtended(lm, 8, 6);
+  const middleUp = isFingerExtended(lm, 12, 10);
+  const ringUp = isFingerExtended(lm, 16, 14);
+  const pinkyUp = isFingerExtended(lm, 20, 18);
+  const count = (thumbUp?1:0) + (indexUp?1:0) + (middleUp?1:0) + (ringUp?1:0) + (pinkyUp?1:0);
+
+  if (count === 0) return { name: 'fist', quality: null, count: 0 };       // mute
+  if (count === 1 && indexUp) return { name: 'point', quality: 'root', count: 1 }; // single note
+  if (count === 2 && indexUp && middleUp && !ringUp) return { name: 'peace', quality: '5', count: 2 }; // power chord
+  if (count === 3 && indexUp && middleUp && ringUp && !pinkyUp) return { name: 'three', quality: 'maj', count: 3 };
+  if (count === 4 && !pinkyUp) return { name: 'four', quality: 'maj7', count: 4 };
+  if (count >= 4) return { name: 'open', quality: 'maj', count: count };
+
+  // Fallbacks
+  if (count >= 3) return { name: 'open', quality: 'maj', count: count };
+  if (count === 2) return { name: 'peace', quality: 'm', count: 2 };
+  return { name: 'point', quality: 'root', count: 1 };
 }
 
 // ─── Drawing ──────────────────────────────────────
@@ -339,14 +379,16 @@ async function processFrame() {
 
       // Determine which hand
       const handObj = { x: wrist.x, y: wrist.y, angle };
+      const gesture = getGesture(lm);
+      handObj.gesture = gesture;
 
-      // Note wheel (left hand) or melody
+      // Note wheel (left hand angle → note)
       const noteIdx = angleToSegment(angle, numNotes, snapCheck.checked);
       handObj.note = scaleNotes[noteIdx] || 'C';
 
-      // Chord quality wheel (right hand)
-      const qualityIdx = angleToSegment(angle, CHORD_QUALITIES.length, snapCheck.checked);
-      handObj.quality = CHORD_QUALITIES[qualityIdx];
+      // Right hand: gesture controls chord quality, height controls volume
+      handObj.quality = gesture.quality || 'maj';
+      handObj.volume = Math.max(0.05, Math.min(0.8, 1.0 - wrist.y)); // y=0(top)=loud, y=1(bottom)=quiet
 
       // Assign based on handedness
       if (isLeft && !leftHand) leftHand = handObj;
@@ -364,39 +406,65 @@ async function processFrame() {
 
     handsCount.textContent = `Hands: ${results.landmarks.length}`;
 
-    // Determine chord
+    // Determine chord from hand gestures
     const mode = modeSelect.value;
-    let rootNote = 'C', quality = 'maj';
+    let rootNote = 'C', quality = 'maj', volume = 0.25;
+    let gestureName = '—';
 
     if (mode === 'two-hand' && leftHand && rightHand) {
       rootNote = leftHand.note;
-      quality = rightHand.quality;
+      quality = rightHand.gesture?.quality || 'maj';
+      volume = rightHand.volume || 0.25;
+      gestureName = rightHand.gesture?.name || '?';
     } else if (mode === 'melody' && rightHand) {
       rootNote = rightHand.note;
-      quality = 'maj';
+      quality = rightHand.gesture?.quality || 'maj';
+      volume = rightHand.volume || 0.25;
+      gestureName = rightHand.gesture?.name || '?';
     } else if (leftHand) {
       rootNote = leftHand.note;
-      quality = 'maj';
+      quality = leftHand.gesture?.quality || 'maj';
+      volume = leftHand.volume || 0.25;
+      gestureName = leftHand.gesture?.name || '?';
     }
 
-    const chordFreqs = getChordFreqs(rootNote, quality);
-    const chordName = `${rootNote}${quality === 'maj' ? '' : quality}`;
+    // Fist = mute
+    if (quality === null) {
+      stopAllOscillators();
+      currentChord = null;
+      chordLabel.textContent = '🔇';
+      noteInfo.textContent = 'Gesture: fist';
+      freqInfo.textContent = 'muted';
+    } else {
+      const chordFreqs = getChordFreqs(rootNote, quality);
+      const chordName = `${rootNote}${quality === 'maj' ? '' : quality === 'root' ? '' : quality}`;
 
-    chordLabel.textContent = chordName === currentChord?.name ? currentChord?.name : chordName;
-    if (chordName !== currentChord?.name) {
-      currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs };
-      chordLabel.textContent = chordName;
-      noteInfo.textContent = `Note: ${rootNote} (${quality})`;
-      freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
-      playChord(chordFreqs);
+      chordLabel.textContent = chordName === currentChord?.name ? currentChord?.name : chordName;
+      if (chordName !== currentChord?.name || volume !== currentChord?.volume) {
+        currentChord = { name: chordName, root: rootNote, quality, freqs: chordFreqs, volume };
+        chordLabel.textContent = chordName;
+        noteInfo.textContent = `Note: ${rootNote} (${quality}) 🖐 ${gestureName}`;
+        freqInfo.textContent = `Freq: ${chordFreqs.map(f=>Math.round(f)).join('/')} Hz`;
+        playChord(chordFreqs, volume);
+      }
     }
 
     // Draw wheels
     const cxL = w * 0.28, cxR = w * 0.72, cyW = h * 0.42, rad = Math.min(w * 0.2, h * 0.22);
     if (leftHand) drawWheel(cxL, cyW, rad, numNotes, scaleNotes,
       angleToSegment(leftHand.angle, numNotes, snapCheck.checked), 'rgba(255,153,68,0.5)');
-    if (rightHand) drawWheel(cxR, cyW, rad, CHORD_QUALITIES.length, CHORD_QUALITIES,
-      angleToSegment(rightHand.angle, CHORD_QUALITIES.length, snapCheck.checked), 'rgba(68,153,255,0.5)');
+    // Right hand: show gesture label instead of wheel
+    if (rightHand) {
+      const g = rightHand.gesture;
+      ctx.fillStyle = '#4499ff';
+      ctx.font = 'bold 20px system-ui';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(g?.name || '?', cxR, cyW);
+      ctx.font = '11px system-ui';
+      ctx.fillStyle = 'rgba(68,153,255,0.7)';
+      ctx.fillText(`${g?.count || 0} fingers`, cxR, cyW + 22);
+    }
   } else {
     handsCount.textContent = 'Hands: 0';
     chordLabel.textContent = '—';
