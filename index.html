@@ -384,8 +384,8 @@ async function processFrame() {
 
       // Left hand: height = pitch (higher hand = higher note)
       //            openness = volume (open palm = loud, fist = quiet)
-      const h = 1.0 - wrist.y; // 0=bottom, 1=top
-      const noteIdx = Math.floor(h * numNotes);
+      const handH = 1.0 - wrist.y; // 0=bottom, 1=top
+      const noteIdx = Math.floor(handH * numNotes);
       handObj.note = scaleNotes[Math.min(noteIdx, numNotes - 1)] || 'C';
       handObj.volume = gesture.count / 5; // 0 fingers=0, 5 fingers=1
 
@@ -461,8 +461,8 @@ async function processFrame() {
       ctx.fillStyle = 'rgba(255,153,68,0.6)';
       ctx.fillRect(barX, barTop, volW, barH);
       // Pitch indicator (hand height)
-      const h = 1.0 - leftHand.y;
-      const py = barTop + barH * (1 - h);
+      const pitch = 1.0 - leftHand.y; // 0=bottom, 1=top
+      const py = barTop + barH * (1 - pitch);
       ctx.fillStyle = '#ff9944';
       ctx.fillRect(barX - 4, py - 3, barW + 8, 6);
       // Labels
